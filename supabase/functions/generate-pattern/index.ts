@@ -12,9 +12,18 @@ serve(async (req) => {
   }
 
   try {
-    const { image, width, height, material } = await req.json();
+    const { images, image, width, height, depth, material, description } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
+
+    // Support both old single-image format and new multi-image format
+    const imageList: { base64: string; angle: string }[] = images
+      ? images
+      : image
+      ? [{ base64: image, angle: "Front view" }]
+      : [];
+
+    if (imageList.length === 0) throw new Error("No images provided");
 
     const seamDefaults: Record<string, number> = {
       fabric: 1.5,
@@ -23,55 +32,118 @@ serve(async (req) => {
       foam: 0.5,
     };
 
-    const systemPrompt = `You are an expert pattern maker and tailor. Given an image of a 3D object, analyze its shape and generate 2D cutting pattern pieces that could be assembled to replicate the object.
+    const dimInfo = [
+      width ? `Width: ${width} cm` : null,
+      height ? `Height: ${height} cm` : null,
+      depth ? `Depth: ${depth} cm` : null,
+    ].filter(Boolean).join(", ");
 
-Return a JSON object with this exact structure (no markdown, no code fences):
+    const systemPrompt = `You are a master pattern maker with decades of experience in tailoring, upholstery, leatherwork, and industrial pattern engineering. Your task is to analyze reference images of a 3D object and produce precise, production-ready 2D flat pattern pieces.
+
+## ANALYSIS METHODOLOGY
+
+Follow this exact process:
+
+### Step 1: Identify the Object
+Study all provided reference images. Determine:
+- What the object is (bag, garment, cushion, case, etc.)
+- Its overall geometric shape (box, cylinder, sphere, organic, compound)
+- How many distinct surfaces/faces it has
+- Where seams, edges, and joints would naturally fall
+
+### Step 2: Decompose into Surfaces
+Break the 3D object into its individual flat or developable surfaces:
+- For BOX-like objects: front, back, left side, right side, top, bottom (6 faces)
+- For CYLINDRICAL objects: body wrap (rectangle), top circle, bottom circle
+- For BAGS: front panel, back panel, side gussets, bottom, flap/closure, pockets
+- For GARMENTS: bodice front, bodice back, sleeves, collar, facings
+- For ORGANIC shapes: approximate with darts, gathers, or segmented panels
+
+### Step 3: Determine Proportions
+${dimInfo ? `The user provided these real measurements: ${dimInfo}. Use them as the ground truth for proportions.` : "No measurements were given. Estimate proportions from the images. Use the relative sizes of features visible in the photos."}
+Ensure all pieces are proportionally correct relative to each other.
+
+### Step 4: Draw Accurate SVG Paths
+For each pattern piece, create a precise SVG path:
+- Use M (move), L (line), Q (quadratic curve), C (cubic curve), A (arc), and Z (close) commands
+- ALL coordinates must be within 0-200 (x) and 0-300 (y) range
+- The path MUST be a closed shape (end with Z)
+- Curves should follow the actual contours of the object — do NOT simplify everything to rectangles
+- For rounded corners, use Q or C curves
+- For circular/elliptical pieces, use A (arc) commands
+- Start path at top-left of the piece and go clockwise
+
+### Step 5: Add Construction Details
+For each piece specify:
+- A grain line (usually runs lengthwise/vertically through the center of the piece)
+- The piece label (descriptive name matching standard pattern terminology)
+
+## ACCURACY RULES
+- Pieces must FIT TOGETHER when assembled. Adjacent edges must have matching lengths.
+- A cylinder body piece width = circumference = π × diameter
+- A box face width must match the adjacent face height
+- Curved surfaces require darts or ease — include them as separate small triangular pieces or notches
+- If the object has symmetry, pattern pieces should reflect that
+- Include ALL pieces needed — don't skip small pieces like straps, tabs, pocket flaps, or reinforcements
+
+## OUTPUT FORMAT
+
+Return ONLY a valid JSON object (no markdown fences, no explanation):
 {
-  "name": "descriptive name of the object",
+  "name": "Descriptive name of the object",
+  "description": "Brief construction notes — how pieces assemble together",
   "pieces": [
     {
-      "id": "unique_id",
-      "label": "Human readable label",
-      "path": "SVG path string (M/L/Q/Z commands) fitting in a 0-200 x 0-300 coordinate space",
-      "width": number (max coordinate X),
-      "height": number (max coordinate Y),
-      "grainLine": { "x1": number, "y1": number, "x2": number, "y2": number }
+      "id": "unique_snake_case_id",
+      "label": "Human Readable Label (e.g. Front Panel, Side Gusset, Strap)",
+      "path": "M ... Z",
+      "width": <max X coordinate used in path>,
+      "height": <max Y coordinate used in path>,
+      "grainLine": { "x1": <number>, "y1": <number>, "x2": <number>, "y2": <number> },
+      "notes": "Assembly notes for this piece (e.g. 'Attach to front panel along curved edge')"
     }
   ],
   "estimatedMaterial": {
-    "width": estimated fabric width in cm,
-    "length": estimated fabric length in cm,
+    "width": <total material width in cm>,
+    "length": <total material length in cm>,
     "unit": "cm"
-  }
+  },
+  "assemblyOrder": ["Step 1: ...", "Step 2: ...", "Step 3: ..."]
 }
 
-Guidelines:
-- Break the object into logical flat pieces (front, back, sides, bottom, gussets, etc.)
-- Each piece path should be a closed SVG path using M, L, Q, and Z commands
-- Keep coordinates within 0-200 for width and 0-300 for height
-- Include grain lines as vertical center lines for each piece
-- Material is "${material}" with default seam allowance of ${seamDefaults[material] || 1} cm
-${width ? `- Object width is approximately ${width} cm` : ""}
-${height ? `- Object height is approximately ${height} cm` : ""}
-- Generate 3-6 pattern pieces depending on the object complexity
-- Make pieces realistic and proportional`;
+Material type: "${material}" (seam allowance: ${seamDefaults[material] || 1} cm)
+${description ? `\nUser description: "${description}"` : ""}
+${imageList.length > 1 ? `\nYou have ${imageList.length} reference images from different angles. Cross-reference them to understand the full 3D geometry.` : ""}`;
 
-    const userPrompt = "Analyze this object image and generate 2D cutting pattern pieces for it. Return ONLY the JSON object, no other text.";
+    // Build content array with all images
+    const userContent: any[] = [];
 
-    const messages: any[] = [
+    if (imageList.length === 1) {
+      userContent.push({ type: "text", text: "Analyze this object and generate precise 2D cutting pattern pieces. Return ONLY the JSON." });
+      userContent.push({
+        type: "image_url",
+        image_url: { url: `data:image/jpeg;base64,${imageList[0].base64}` },
+      });
+    } else {
+      userContent.push({
+        type: "text",
+        text: `I'm providing ${imageList.length} reference photos from different angles. Cross-reference ALL of them to understand the full 3D shape before generating pattern pieces. Return ONLY the JSON.`,
+      });
+      for (const img of imageList) {
+        userContent.push({ type: "text", text: `[${img.angle}]:` });
+        userContent.push({
+          type: "image_url",
+          image_url: { url: `data:image/jpeg;base64,${img.base64}` },
+        });
+      }
+    }
+
+    const messages = [
       { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: userPrompt },
-          {
-            type: "image_url",
-            image_url: { url: `data:image/jpeg;base64,${image}` },
-          },
-        ],
-      },
+      { role: "user", content: userContent },
     ];
 
+    // Use Pro model for better accuracy with visual analysis
     const response = await fetch(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
       {
@@ -81,7 +153,7 @@ ${height ? `- Object height is approximately ${height} cm` : ""}
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "google/gemini-3-flash-preview",
+          model: "google/gemini-2.5-pro",
           messages,
         }),
       }
@@ -114,7 +186,38 @@ ${height ? `- Object height is approximately ${height} cm` : ""}
       jsonStr = jsonStr.replace(/^```(?:json)?\s*/, "").replace(/```\s*$/, "");
     }
 
+    // Try to extract JSON if there's surrounding text
+    if (!jsonStr.startsWith("{")) {
+      const match = jsonStr.match(/\{[\s\S]*\}/);
+      if (match) jsonStr = match[0];
+    }
+
     const patternData = JSON.parse(jsonStr);
+
+    // Validate and sanitize the output
+    if (!patternData.pieces || !Array.isArray(patternData.pieces) || patternData.pieces.length === 0) {
+      throw new Error("AI returned no pattern pieces");
+    }
+
+    // Ensure all pieces have required fields
+    for (const piece of patternData.pieces) {
+      if (!piece.path || !piece.id || !piece.label) {
+        throw new Error("AI returned incomplete pattern piece data");
+      }
+      // Ensure path is closed
+      if (!piece.path.trim().endsWith("Z") && !piece.path.trim().endsWith("z")) {
+        piece.path = piece.path.trim() + " Z";
+      }
+      // Default grain line if missing
+      if (!piece.grainLine) {
+        piece.grainLine = {
+          x1: (piece.width || 100) / 2,
+          y1: 20,
+          x2: (piece.width || 100) / 2,
+          y2: (piece.height || 200) - 20,
+        };
+      }
+    }
 
     return new Response(JSON.stringify(patternData), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
