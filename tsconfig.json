@@ -5,6 +5,9 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "paths": {
+      "@shared/*": [
+        "./shared/*"
+      ],
       "@/*": [
         "./src/*"
       ]

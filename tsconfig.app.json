@@ -17,6 +17,9 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "paths": {
+      "@shared/*": [
+        "./shared/*"
+      ],
       "@/*": [
         "./src/*"
       ]
@@ -30,6 +33,7 @@
     "useDefineForClassFields": true
   },
   "include": [
-    "src"
+    "src",
+    "shared"
   ]
 }

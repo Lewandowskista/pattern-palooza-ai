@@ -101,7 +101,7 @@ const Index = () => {
             Built for Every Craft
           </h2>
           <p className="text-muted-foreground text-center mb-14 max-w-lg mx-auto">
-            Whether you sew, upholster, or build — PatternCraft adapts to your discipline
+            Whether you sew, upholster, or build, PatternCraft adapts to your discipline.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 max-w-4xl mx-auto">
             {examples.map((ex, i) => (

@@ -1,4 +1,14 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { z } from "npm:zod";
+import {
+  type AssemblyStep,
+  generateAssemblyStepsFallback,
+  MATERIAL_VALUES,
+  MAX_DIMENSION_CM,
+  type PatternPiece,
+  SEAM_ALLOWANCES,
+  type MaterialType,
+} from "../../../shared/pattern.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -6,37 +16,166 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+const finiteNumber = z.number().finite();
+const materialSchema = z.enum(MATERIAL_VALUES as [MaterialType, ...MaterialType[]]);
+
+const requestImageSchema = z.object({
+  base64: z.string().trim().min(1),
+  angle: z.string().trim().min(1),
+});
+
+const requestSchema = z
+  .object({
+    images: z.array(requestImageSchema).max(8).optional(),
+    image: z.string().trim().min(1).optional(),
+    width: finiteNumber.positive().max(MAX_DIMENSION_CM).optional(),
+    height: finiteNumber.positive().max(MAX_DIMENSION_CM).optional(),
+    depth: finiteNumber.positive().max(MAX_DIMENSION_CM).optional(),
+    material: materialSchema.default("fabric"),
+    description: z.string().trim().max(500).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.images?.length && !value.image) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "At least one image is required.",
+        path: ["images"],
+      });
+    }
+  });
+
+const patternPieceSchema = z.object({
+  id: z.string().trim().min(1),
+  label: z.string().trim().min(1),
+  path: z.string().trim().min(1),
+  width: finiteNumber.positive().max(MAX_DIMENSION_CM),
+  height: finiteNumber.positive().max(MAX_DIMENSION_CM),
+  grainLine: z
+    .object({
+      x1: finiteNumber,
+      y1: finiteNumber,
+      x2: finiteNumber,
+      y2: finiteNumber,
+    })
+    .optional(),
+  notes: z.string().trim().min(1).optional(),
+});
+
+const patternResponseSchema = z.object({
+  name: z.string().trim().min(1),
+  description: z.string().trim().min(1).optional(),
+  pieces: z.array(patternPieceSchema).min(1),
+  assemblySteps: z
+    .array(
+      z.object({
+        stepNumber: z.number().int().positive(),
+        piecesInvolved: z.array(z.string().trim().min(1)).default([]),
+        instruction: z.string().trim().min(1),
+      }),
+    )
+    .optional(),
+  estimatedMaterial: z.object({
+    width: finiteNumber.nonnegative().max(MAX_DIMENSION_CM),
+    length: finiteNumber.nonnegative().max(MAX_DIMENSION_CM),
+    unit: z.string().trim().min(1),
+  }),
+});
+
+type GatewayContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+function jsonResponse(
+  body: Record<string, unknown>,
+  status = 200,
+) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function normalizeSvgPath(path: string) {
+  const withoutUnsafeChars = path
+    .replace(/[^MmLlHhVvCcSsQqTtAaZz0-9.,\-\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return /[Zz]$/.test(withoutUnsafeChars)
+    ? withoutUnsafeChars
+    : `${withoutUnsafeChars} Z`;
+}
+
+function sanitizePatternData(input: unknown) {
+  const parsed = patternResponseSchema.parse(input);
+  const normalizedPieces: PatternPiece[] = parsed.pieces.map((piece) => ({
+    ...piece,
+    path: normalizeSvgPath(piece.path),
+    grainLine: piece.grainLine ?? {
+      x1: piece.width / 2,
+      y1: 20,
+      x2: piece.width / 2,
+      y2: Math.max(piece.height - 20, 20),
+    },
+  }));
+  const normalizedAssemblySteps: AssemblyStep[] =
+    parsed.assemblySteps?.length
+      ? parsed.assemblySteps.map((step, index) => ({
+          ...step,
+          stepNumber: index + 1,
+        }))
+      : generateAssemblyStepsFallback(normalizedPieces, parsed.description);
+
+  return {
+    ...parsed,
+    pieces: normalizedPieces,
+    assemblySteps: normalizedAssemblySteps,
+  };
+}
+
+function extractJsonPayload(content: string) {
+  let jsonString = content.trim();
+
+  if (jsonString.startsWith("```")) {
+    jsonString = jsonString.replace(/^```(?:json)?\s*/, "").replace(/```\s*$/, "");
+  }
+
+  if (!jsonString.startsWith("{")) {
+    const match = jsonString.match(/\{[\s\S]*\}/);
+    if (match) {
+      jsonString = match[0];
+    }
+  }
+
+  return JSON.parse(jsonString);
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { images, image, width, height, depth, material, description } = await req.json();
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
+    const body = requestSchema.parse(await req.json());
+    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
 
-    // Support both old single-image format and new multi-image format
-    const imageList: { base64: string; angle: string }[] = images
-      ? images
-      : image
-      ? [{ base64: image, angle: "Front view" }]
-      : [];
+    if (!lovableApiKey) {
+      throw new Error("LOVABLE_API_KEY is not configured");
+    }
 
-    if (imageList.length === 0) throw new Error("No images provided");
-
-    const seamDefaults: Record<string, number> = {
-      fabric: 1.5,
-      leather: 0.6,
-      paper: 0,
-      foam: 0.5,
-    };
+    const imageList = body.images?.length
+      ? body.images
+      : body.image
+        ? [{ base64: body.image, angle: "Front view" }]
+        : [];
 
     const dimInfo = [
-      width ? `Width: ${width} cm` : null,
-      height ? `Height: ${height} cm` : null,
-      depth ? `Depth: ${depth} cm` : null,
-    ].filter(Boolean).join(", ");
+      body.width ? `Width: ${body.width} cm` : null,
+      body.height ? `Height: ${body.height} cm` : null,
+      body.depth ? `Depth: ${body.depth} cm` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
 
     const systemPrompt = `You are a master pattern maker with decades of experience in tailoring, upholstery, leatherwork, and industrial pattern engineering. Your task is to analyze reference images of a 3D object and produce precise, production-ready 2D flat pattern pieces.
 
@@ -68,165 +207,180 @@ For each pattern piece, create a precise SVG path:
 - Use M (move), L (line), Q (quadratic curve), C (cubic curve), A (arc), and Z (close) commands
 - ALL coordinates must be within 0-200 (x) and 0-300 (y) range
 - The path MUST be a closed shape (end with Z)
-- Curves should follow the actual contours of the object — do NOT simplify everything to rectangles
+- Curves should follow the actual contours of the object; do not simplify everything to rectangles
 - For rounded corners, use Q or C curves
-- For circular/elliptical pieces, use A (arc) commands
+- For circular or elliptical pieces, use A (arc) commands
 - Start path at top-left of the piece and go clockwise
 
 ### Step 5: Add Construction Details
 For each piece specify:
-- A grain line (usually runs lengthwise/vertically through the center of the piece)
+- A grain line (usually runs lengthwise or vertically through the center of the piece)
 - The piece label (descriptive name matching standard pattern terminology)
 
 ## ACCURACY RULES
 - Pieces must FIT TOGETHER when assembled. Adjacent edges must have matching lengths.
-- A cylinder body piece width = circumference = π × diameter
+- A cylinder body piece width = circumference = pi x diameter
 - A box face width must match the adjacent face height
-- Curved surfaces require darts or ease — include them as separate small triangular pieces or notches
+- Curved surfaces require darts or ease; include them as separate small triangular pieces or notches
 - If the object has symmetry, pattern pieces should reflect that
-- Include ALL pieces needed — don't skip small pieces like straps, tabs, pocket flaps, or reinforcements
+- Include ALL pieces needed; don't skip small pieces like straps, tabs, pocket flaps, or reinforcements
 
 ## OUTPUT FORMAT
 
 Return ONLY a valid JSON object (no markdown fences, no explanation):
 {
   "name": "Descriptive name of the object",
-  "description": "Brief construction notes — how pieces assemble together",
+  "description": "Brief construction notes - how pieces assemble together",
   "pieces": [
     {
       "id": "unique_snake_case_id",
       "label": "Human Readable Label (e.g. Front Panel, Side Gusset, Strap)",
       "path": "M ... Z",
-      "width": <max X coordinate used in path>,
-      "height": <max Y coordinate used in path>,
-      "grainLine": { "x1": <number>, "y1": <number>, "x2": <number>, "y2": <number> },
-      "notes": "Assembly notes for this piece (e.g. 'Attach to front panel along curved edge')"
+      "width": number,
+      "height": number,
+      "grainLine": { "x1": number, "y1": number, "x2": number, "y2": number },
+      "notes": "Assembly notes for this piece (e.g. Attach to front panel along curved edge)"
     }
   ],
   "estimatedMaterial": {
-    "width": <total material width in cm>,
-    "length": <total material length in cm>,
+    "width": number,
+    "length": number,
     "unit": "cm"
   },
   "assemblyOrder": ["Step 1: ...", "Step 2: ...", "Step 3: ..."]
 }
 
-Material type: "${material}" (seam allowance: ${seamDefaults[material] || 1} cm)
-${description ? `\nUser description: "${description}"` : ""}
+Material type: "${body.material}" (standard seam allowance: ${SEAM_ALLOWANCES[body.material] ?? 1} cm)
+${body.description ? `\nUser description: "${body.description}"` : ""}
 ${imageList.length > 1 ? `\nYou have ${imageList.length} reference images from different angles. Cross-reference them to understand the full 3D geometry.` : ""}`;
 
-    // Build content array with all images
-    const userContent: any[] = [];
+    const userContent: GatewayContentPart[] = imageList.length === 1
+      ? [
+          {
+            type: "text",
+            text: "Analyze this object and generate precise 2D cutting pattern pieces. Return ONLY the JSON.",
+          },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${imageList[0].base64}` },
+          },
+        ]
+      : [
+          {
+            type: "text",
+            text: `I'm providing ${imageList.length} reference photos from different angles. Cross-reference ALL of them to understand the full 3D shape before generating pattern pieces. Return ONLY the JSON.`,
+          },
+          ...imageList.flatMap((image) => [
+            { type: "text", text: `[${image.angle}]` } as const,
+            {
+              type: "image_url" as const,
+              image_url: { url: `data:image/jpeg;base64,${image.base64}` },
+            },
+          ]),
+        ];
 
-    if (imageList.length === 1) {
-      userContent.push({ type: "text", text: "Analyze this object and generate precise 2D cutting pattern pieces. Return ONLY the JSON." });
-      userContent.push({
-        type: "image_url",
-        image_url: { url: `data:image/jpeg;base64,${imageList[0].base64}` },
-      });
-    } else {
-      userContent.push({
-        type: "text",
-        text: `I'm providing ${imageList.length} reference photos from different angles. Cross-reference ALL of them to understand the full 3D shape before generating pattern pieces. Return ONLY the JSON.`,
-      });
-      for (const img of imageList) {
-        userContent.push({ type: "text", text: `[${img.angle}]:` });
-        userContent.push({
-          type: "image_url",
-          image_url: { url: `data:image/jpeg;base64,${img.base64}` },
-        });
-      }
-    }
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userContent },
-    ];
-
-    // Use Pro model for better accuracy with visual analysis
-    const response = await fetch(
-      "https://ai.gateway.lovable.dev/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${LOVABLE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.5-pro",
-          messages,
-        }),
-      }
-    );
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${lovableApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-pro",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent },
+        ],
+      }),
+    });
 
     if (!response.ok) {
       if (response.status === 429) {
-        return new Response(
-          JSON.stringify({ error: "Rate limited, please try again shortly." }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        return jsonResponse(
+          { error: "Rate limited, please try again shortly.", category: "gateway_rate_limit" },
+          429,
         );
       }
+
       if (response.status === 402) {
-        return new Response(
-          JSON.stringify({ error: "Credits exhausted. Please add funds." }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        return jsonResponse(
+          { error: "Credits exhausted. Please add funds.", category: "gateway_billing" },
+          402,
         );
       }
+
       const text = await response.text();
-      console.error("AI gateway error:", response.status, text);
-      throw new Error("AI gateway error");
+      console.error("AI gateway error", {
+        status: response.status,
+        bodyPreview: text.slice(0, 300),
+      });
+
+      return jsonResponse(
+        { error: "AI gateway error", category: "gateway_error" },
+        502,
+      );
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || "";
+    const content = data?.choices?.[0]?.message?.content;
 
-    // Parse JSON from response (strip markdown fences if present)
-    let jsonStr = content.trim();
-    if (jsonStr.startsWith("```")) {
-      jsonStr = jsonStr.replace(/^```(?:json)?\s*/, "").replace(/```\s*$/, "");
+    if (typeof content !== "string" || !content.trim()) {
+      console.error("AI gateway returned empty content");
+      return jsonResponse(
+        { error: "The AI response was empty.", category: "invalid_model_output" },
+        502,
+      );
     }
 
-    // Try to extract JSON if there's surrounding text
-    if (!jsonStr.startsWith("{")) {
-      const match = jsonStr.match(/\{[\s\S]*\}/);
-      if (match) jsonStr = match[0];
+    let parsedPayload: unknown;
+
+    try {
+      parsedPayload = extractJsonPayload(content);
+    } catch (error) {
+      console.error("Failed to parse AI JSON", {
+        error: error instanceof Error ? error.message : String(error),
+        contentPreview: content.slice(0, 300),
+      });
+      return jsonResponse(
+        { error: "Failed to parse AI response.", category: "response_parse_error" },
+        502,
+      );
     }
 
-    const patternData = JSON.parse(jsonStr);
+    try {
+      const patternData = sanitizePatternData(parsedPayload);
+      return jsonResponse(patternData);
+    } catch (error) {
+      const issues = error instanceof z.ZodError ? error.issues : undefined;
+      console.error("Invalid AI payload", {
+        issues,
+        payloadPreview: JSON.stringify(parsedPayload).slice(0, 300),
+      });
 
-    // Validate and sanitize the output
-    if (!patternData.pieces || !Array.isArray(patternData.pieces) || patternData.pieces.length === 0) {
-      throw new Error("AI returned no pattern pieces");
+      return jsonResponse(
+        { error: "AI returned invalid pattern data.", category: "invalid_model_output" },
+        502,
+      );
+    }
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return jsonResponse(
+        {
+          error: "Invalid request payload.",
+          category: "invalid_request",
+          details: error.flatten(),
+        },
+        400,
+      );
     }
 
-    // Ensure all pieces have required fields
-    for (const piece of patternData.pieces) {
-      if (!piece.path || !piece.id || !piece.label) {
-        throw new Error("AI returned incomplete pattern piece data");
-      }
-      // Ensure path is closed
-      if (!piece.path.trim().endsWith("Z") && !piece.path.trim().endsWith("z")) {
-        piece.path = piece.path.trim() + " Z";
-      }
-      // Default grain line if missing
-      if (!piece.grainLine) {
-        piece.grainLine = {
-          x1: (piece.width || 100) / 2,
-          y1: 20,
-          x2: (piece.width || 100) / 2,
-          y2: (piece.height || 200) - 20,
-        };
-      }
-    }
-
-    return new Response(JSON.stringify(patternData), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    console.error("generate-pattern error", {
+      error: error instanceof Error ? error.message : String(error),
     });
-  } catch (e) {
-    console.error("generate-pattern error:", e);
-    return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+
+    return jsonResponse(
+      { error: error instanceof Error ? error.message : "Unknown error", category: "internal_error" },
+      500,
     );
   }
 });
