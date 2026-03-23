@@ -39,8 +39,6 @@ import { type EditorState, editorStateSchema } from "@/lib/pattern-schema";
 import { loadLastPatternDraft } from "@/lib/pattern-storage";
 
 
-import { type EditorState, editorStateSchema } from "@/lib/pattern-schema";
-import { loadLastPatternDraft } from "@/lib/pattern-storage";
 
 function resolveEditorPattern(state: unknown): { pattern: PatternData; material: MaterialType } | null {
   const parsedState = editorStateSchema.safeParse(state) as
