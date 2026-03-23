@@ -8,7 +8,35 @@ import {
   Info,
   Maximize,
   Ruler,
+  Save,
   Scissors as ScissorsIcon,
+  Tag,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
+import {
+  SEAM_ALLOWANCES,
+  type MaterialType,
+  type PatternData,
+} from "@shared/pattern";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
+import {
+  calculatePatternLayout,
+  EDITOR_LABEL_GAP,
+  SVG_UNITS_PER_CM,
+} from "@/lib/editor-layout";
+import { exportPatternPdf } from "@/lib/pattern-pdf";
+import { type EditorState, editorStateSchema } from "@/lib/pattern-schema";
+import { loadLastPatternDraft } from "@/lib/pattern-storage";
   Tag,
   ZoomIn,
   ZoomOut,
