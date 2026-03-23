@@ -55,7 +55,7 @@ const MyPatternsPage = () => {
     if (error) {
       toast({ title: "Failed to load patterns", description: error.message, variant: "destructive" });
     } else {
-      setPatterns((data ?? []) as SavedPattern[]);
+      setPatterns((data ?? []) as unknown as SavedPattern[]);
     }
     setLoading(false);
   };
