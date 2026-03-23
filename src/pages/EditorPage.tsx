@@ -356,9 +356,57 @@ const EditorPage = () => {
           </TabsContent>
         </Tabs>
 
+        {user && (
+          <Button
+            onClick={async () => {
+              if (!pattern) return;
+              setIsSaving(true);
+              try {
+                const patternRecord = {
+                  user_id: user.id,
+                  name: pattern.name,
+                  description: pattern.description || null,
+                  material: materialType,
+                  pattern_data: pattern as any,
+                  updated_at: new Date().toISOString(),
+                };
+
+                if (savedPatternId) {
+                  const { error } = await supabase
+                    .from("saved_patterns")
+                    .update(patternRecord)
+                    .eq("id", savedPatternId);
+                  if (error) throw error;
+                } else {
+                  const { error } = await supabase
+                    .from("saved_patterns")
+                    .insert(patternRecord);
+                  if (error) throw error;
+                }
+
+                toast({ title: "Pattern saved!" });
+              } catch (err: any) {
+                toast({
+                  title: "Save failed",
+                  description: err?.message || "Could not save pattern.",
+                  variant: "destructive",
+                });
+              } finally {
+                setIsSaving(false);
+              }
+            }}
+            variant="outline"
+            className="w-full gap-2"
+            disabled={isSaving}
+          >
+            <Save className="h-4 w-4" />
+            {isSaving ? "Saving..." : "Save Pattern"}
+          </Button>
+        )}
+
         <Button
           onClick={handleDownloadPDF}
-          className="mt-6 w-full gap-2"
+          className="w-full gap-2"
           disabled={isExporting}
         >
           <Download className="h-4 w-4" />
