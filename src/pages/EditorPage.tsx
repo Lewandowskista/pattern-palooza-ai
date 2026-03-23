@@ -113,6 +113,10 @@ const EditorPage = () => {
   const [selectedPiece, setSelectedPiece] = useState<string | null>(null);
   const [highlightedPieces, setHighlightedPieces] = useState<string[]>([]);
   const [isExporting, setIsExporting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const { user } = useAuth();
+
+  const savedPatternId = (location.state as any)?.savedPatternId as string | undefined;
 
   useEffect(() => {
     setSeamWidth(SEAM_ALLOWANCES[materialType] ?? 1);
