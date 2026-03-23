@@ -8,6 +8,7 @@ import {
   Info,
   Maximize,
   Ruler,
+  Save,
   Scissors as ScissorsIcon,
   Tag,
   ZoomIn,
@@ -26,6 +27,8 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import {
   calculatePatternLayout,
   EDITOR_LABEL_GAP,
@@ -34,6 +37,8 @@ import {
 import { exportPatternPdf } from "@/lib/pattern-pdf";
 import { type EditorState, editorStateSchema } from "@/lib/pattern-schema";
 import { loadLastPatternDraft } from "@/lib/pattern-storage";
+
+
 
 function resolveEditorPattern(state: unknown): { pattern: PatternData; material: MaterialType } | null {
   const parsedState = editorStateSchema.safeParse(state) as
@@ -85,6 +90,10 @@ const EditorPage = () => {
   const [selectedPiece, setSelectedPiece] = useState<string | null>(null);
   const [highlightedPieces, setHighlightedPieces] = useState<string[]>([]);
   const [isExporting, setIsExporting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const { user } = useAuth();
+
+  const savedPatternId = (location.state as any)?.savedPatternId as string | undefined;
 
   useEffect(() => {
     setSeamWidth(SEAM_ALLOWANCES[materialType] ?? 1);
@@ -324,9 +333,57 @@ const EditorPage = () => {
           </TabsContent>
         </Tabs>
 
+        {user && (
+          <Button
+            onClick={async () => {
+              if (!pattern) return;
+              setIsSaving(true);
+              try {
+                const patternRecord = {
+                  user_id: user.id,
+                  name: pattern.name,
+                  description: pattern.description || null,
+                  material: materialType,
+                  pattern_data: pattern as any,
+                  updated_at: new Date().toISOString(),
+                };
+
+                if (savedPatternId) {
+                  const { error } = await supabase
+                    .from("saved_patterns")
+                    .update(patternRecord)
+                    .eq("id", savedPatternId);
+                  if (error) throw error;
+                } else {
+                  const { error } = await supabase
+                    .from("saved_patterns")
+                    .insert(patternRecord);
+                  if (error) throw error;
+                }
+
+                toast({ title: "Pattern saved!" });
+              } catch (err: any) {
+                toast({
+                  title: "Save failed",
+                  description: err?.message || "Could not save pattern.",
+                  variant: "destructive",
+                });
+              } finally {
+                setIsSaving(false);
+              }
+            }}
+            variant="outline"
+            className="w-full gap-2"
+            disabled={isSaving}
+          >
+            <Save className="h-4 w-4" />
+            {isSaving ? "Saving..." : "Save Pattern"}
+          </Button>
+        )}
+
         <Button
           onClick={handleDownloadPDF}
-          className="mt-6 w-full gap-2"
+          className="w-full gap-2"
           disabled={isExporting}
         >
           <Download className="h-4 w-4" />

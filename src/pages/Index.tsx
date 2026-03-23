@@ -130,13 +130,20 @@ const Index = () => {
             Ready to craft your first pattern?
           </h2>
           <p className="text-muted-foreground mb-8 max-w-md mx-auto">
-            No signup needed. Upload an image and get started in seconds.
+            Sign up for free and start generating patterns in seconds.
           </p>
-          <Link to="/upload">
-            <Button size="lg" className="text-base px-8 py-6 rounded-xl gap-2">
-              Upload an Image <ArrowRight className="w-5 h-5" />
-            </Button>
-          </Link>
+          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+            <Link to="/auth">
+              <Button size="lg" className="text-base px-8 py-6 rounded-xl gap-2">
+                Get Started Free <ArrowRight className="w-5 h-5" />
+              </Button>
+            </Link>
+            <Link to="/upload">
+              <Button variant="outline" size="lg" className="text-base px-8 py-6 rounded-xl">
+                Try Without Account
+              </Button>
+            </Link>
+          </div>
         </div>
       </section>
 
